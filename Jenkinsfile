@@ -13,15 +13,17 @@ pipeline {
             }
         }
 
-        stage('Install dependencies') {
-            steps {
-                sh 'docker run --rm -v jenkins_ci_lab_jenkins_home:/var/jenkins_home -w ${WORKSPACE} node:20-alpine npm install'
+        stage('Install dependencies & Test') {
+            // Jenkins sẽ tự động mount workspace hiện tại vào container node này
+            agent {
+                docker {
+                    image 'node:20-alpine'
+                    reuseNode true
+                }
             }
-        }
-
-        stage('Test') {
             steps {
-                sh 'docker run --rm -v jenkins_ci_lab_jenkins_home:/var/jenkins_home -w ${WORKSPACE} node:20-alpine npm test'
+                sh 'npm install'
+                sh 'npm test'
             }
         }
 
