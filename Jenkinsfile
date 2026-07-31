@@ -35,17 +35,19 @@ pipeline {
         stage('Deploy') {
             steps {
                 sh '''
-                    docker rm -f $CONTAINER_NAME || true
-                    docker run -d \
-                      --name $CONTAINER_NAME \
-                      -p 3000:3000 \
-                      --restart unless-stopped \
-                      $IMAGE_NAME:$BUILD_NUMBER
-                '''
+                # 1. Dừng và xóa Container cũ (nếu đang chạy) để giải phóng Port
+                docker rm -f $CONTAINER_NAME || true
+            
+                # 2. Chạy Container mới với Image vừa được build xong
+                docker run -d \
+                  --name $CONTAINER_NAME \
+                  -p 3000:3000 \
+                  --restart unless-stopped \
+                  $IMAGE_NAME:$BUILD_NUMBER
+              '''
             }
         }
     }
-
     post {
         success {
             echo 'Build and deployment completed successfully.'
