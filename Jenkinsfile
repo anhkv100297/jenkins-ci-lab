@@ -31,20 +31,19 @@ pipeline {
                 sh 'docker build -t $IMAGE_NAME:$BUILD_NUMBER .'
             }
         }
-
         stage('Deploy') {
             steps {
                 sh '''
-                # 1. Dừng và xóa Container cũ (nếu đang chạy) để giải phóng Port
-                docker rm -f $CONTAINER_NAME || true
+                    # Xóa container cũ nếu đang tồn tại (không báo lỗi nếu chưa có)
+                    docker rm -f my-node-app || true
             
-                # 2. Chạy Container mới với Image vừa được build xong
-                docker run -d \
-                  --name $CONTAINER_NAME \
-                  -p 3000:3000 \
-                  --restart unless-stopped \
-                  $IMAGE_NAME:$BUILD_NUMBER
-              '''
+                    # Khởi chạy container mới từ Image vừa build thành công
+                    docker run -d \
+                      --name my-node-app \
+                      -p 3000:3000 \
+                      --restart unless-stopped \
+                      ${IMAGE_NAME}:${BUILD_NUMBER}
+                '''
             }
         }
     }
