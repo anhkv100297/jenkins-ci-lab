@@ -2,14 +2,13 @@ pipeline {
     agent any
 
     options {
-        // Không cho nhiều pipeline chạy chồng lên nhau
-        disableConcurrentBuilds(abortPrevious: true)
+        // Không cho hai build chạy đồng thời
+        disableConcurrentBuilds()
     }
 
     environment {
         DOCKER_IMAGE = "anhkv97/sample-ci-app"
         DEPLOYMENT_FILE = "k8s/deployment.yaml"
-        SKIP_PIPELINE = "false"
     }
 
     stages {
@@ -19,16 +18,20 @@ pipeline {
             }
         }
 
-        stage('Detect changes') {
+        stage('CI/CD Pipeline') {
             steps {
                 script {
+                    /*
+                     * Kiểm tra commit hiện tại.
+                     * Commit do Jenkins tạo sẽ chứa [skip ci].
+                     */
                     def commitMessage = sh(
                         script: 'git log -1 --pretty=%B',
                         returnStdout: true
                     ).trim()
 
                     def changedFiles = sh(
-                        script: 'git diff-tree --no-commit-id --name-only -r HEAD',
+                        script: 'git show --pretty="" --name-only HEAD',
                         returnStdout: true
                     ).trim()
 
@@ -38,164 +41,123 @@ pipeline {
                     echo "Changed files:"
                     echo changedFiles
 
+                    /*
+                     * Nếu commit do Jenkins tạo thì kết thúc ngay tại đây.
+                     * Không install, test, build, push hay sửa manifest nữa.
+                     */
+                    if (commitMessage.contains('[skip ci]')) {
+                        currentBuild.description = "Skipped GitOps manifest commit"
+                        echo "Phát hiện [skip ci]. Dừng pipeline để tránh vòng lặp."
+                        return
+                    }
+
                     def files = changedFiles
                         .split('\n')
-                        .findAll { it?.trim() }
+                        .collect { it.trim() }
+                        .findAll { it }
 
                     def onlyK8sChanged =
                         !files.isEmpty() &&
                         files.every { it.startsWith('k8s/') }
 
-                    if (
-                        commitMessage.contains('[skip ci]') ||
-                        onlyK8sChanged
-                    ) {
-                        env.SKIP_PIPELINE = "true"
-                        echo "Commit chỉ cập nhật manifest Kubernetes. Bỏ qua CI để tránh vòng lặp."
-                    } else {
-                        echo "Có thay đổi source hoặc cấu hình build. Tiếp tục pipeline."
+                    if (onlyK8sChanged) {
+                        currentBuild.description = "Skipped k8s-only commit"
+                        echo "Commit chỉ thay đổi thư mục k8s/. Dừng pipeline."
+                        return
                     }
-                }
-            }
-        }
 
-        stage('Install dependencies') {
-            when {
-                expression {
-                    env.SKIP_PIPELINE != "true"
-                }
-            }
+                    stage('Install dependencies') {
+                        sh '''
+                            docker run --rm \
+                              --volumes-from "$HOSTNAME" \
+                              -w "$WORKSPACE" \
+                              node:20-alpine \
+                              npm install
+                        '''
+                    }
 
-            steps {
-                sh '''
-                    docker run --rm \
-                      --volumes-from "$HOSTNAME" \
-                      -w "$WORKSPACE" \
-                      node:20-alpine \
-                      npm install
-                '''
-            }
-        }
+                    stage('Test') {
+                        sh '''
+                            docker run --rm \
+                              --volumes-from "$HOSTNAME" \
+                              -w "$WORKSPACE" \
+                              node:20-alpine \
+                              npm test
+                        '''
+                    }
 
-        stage('Test') {
-            when {
-                expression {
-                    env.SKIP_PIPELINE != "true"
-                }
-            }
+                    stage('Build Docker image') {
+                        sh '''
+                            docker build \
+                              -t ${DOCKER_IMAGE}:${BUILD_NUMBER} \
+                              -t ${DOCKER_IMAGE}:latest \
+                              .
+                        '''
+                    }
 
-            steps {
-                sh '''
-                    docker run --rm \
-                      --volumes-from "$HOSTNAME" \
-                      -w "$WORKSPACE" \
-                      node:20-alpine \
-                      npm test
-                '''
-            }
-        }
+                    stage('Push Docker image') {
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'dockerhub',
+                                usernameVariable: 'DOCKERHUB_USERNAME',
+                                passwordVariable: 'DOCKERHUB_TOKEN'
+                            )
+                        ]) {
+                            sh '''
+                                echo "$DOCKERHUB_TOKEN" |
+                                  docker login \
+                                    -u "$DOCKERHUB_USERNAME" \
+                                    --password-stdin
 
-        stage('Build Docker image') {
-            when {
-                expression {
-                    env.SKIP_PIPELINE != "true"
-                }
-            }
+                                docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                                docker push ${DOCKER_IMAGE}:latest
 
-            steps {
-                sh '''
-                    docker build \
-                      -t ${DOCKER_IMAGE}:${BUILD_NUMBER} \
-                      -t ${DOCKER_IMAGE}:latest \
-                      .
-                '''
-            }
-        }
+                                docker logout
+                            '''
+                        }
+                    }
 
-        stage('Push Docker image') {
-            when {
-                expression {
-                    env.SKIP_PIPELINE != "true"
-                }
-            }
+                    stage('Update Kubernetes manifest') {
+                        sh '''
+                            echo "Image trước khi cập nhật:"
+                            grep "image:" ${DEPLOYMENT_FILE}
 
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'dockerhub',
-                        usernameVariable: 'DOCKERHUB_USERNAME',
-                        passwordVariable: 'DOCKERHUB_TOKEN'
-                    )
-                ]) {
-                    sh '''
-                        echo "$DOCKERHUB_TOKEN" |
-                          docker login \
-                            -u "$DOCKERHUB_USERNAME" \
-                            --password-stdin
+                            sed -i \
+                              "s|image: ${DOCKER_IMAGE}:.*|image: ${DOCKER_IMAGE}:${BUILD_NUMBER}|" \
+                              ${DEPLOYMENT_FILE}
 
-                        docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
-                        docker push ${DOCKER_IMAGE}:latest
+                            echo "Image sau khi cập nhật:"
+                            grep "image:" ${DEPLOYMENT_FILE}
+                        '''
+                    }
 
-                        docker logout
-                    '''
-                }
-            }
-        }
+                    stage('Push manifest to GitHub') {
+                        withCredentials([
+                            usernamePassword(
+                                credentialsId: 'github-pat',
+                                usernameVariable: 'GITHUB_USERNAME',
+                                passwordVariable: 'GITHUB_TOKEN'
+                            )
+                        ]) {
+                            sh '''
+                                git config user.name "Jenkins CI"
+                                git config user.email "jenkins@example.local"
 
-        stage('Update Kubernetes manifest') {
-            when {
-                expression {
-                    env.SKIP_PIPELINE != "true"
-                }
-            }
+                                git add ${DEPLOYMENT_FILE}
 
-            steps {
-                sh '''
-                    echo "Manifest trước khi cập nhật:"
-                    grep "image:" ${DEPLOYMENT_FILE}
+                                if git diff --cached --quiet; then
+                                    echo "Manifest không thay đổi."
+                                else
+                                    git commit \
+                                      -m "Update image to ${DOCKER_IMAGE}:${BUILD_NUMBER} [skip ci]"
 
-                    sed -i \
-                      "s|image: ${DOCKER_IMAGE}:.*|image: ${DOCKER_IMAGE}:${BUILD_NUMBER}|" \
-                      ${DEPLOYMENT_FILE}
-
-                    echo "Manifest sau khi cập nhật:"
-                    grep "image:" ${DEPLOYMENT_FILE}
-                '''
-            }
-        }
-
-        stage('Push manifest to GitHub') {
-            when {
-                expression {
-                    env.SKIP_PIPELINE != "true"
-                }
-            }
-
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'github-pat',
-                        usernameVariable: 'GITHUB_USERNAME',
-                        passwordVariable: 'GITHUB_TOKEN'
-                    )
-                ]) {
-                    sh '''
-                        git config user.name "Jenkins CI"
-                        git config user.email "jenkins@example.local"
-
-                        git add ${DEPLOYMENT_FILE}
-
-                        if git diff --cached --quiet; then
-                            echo "Manifest không thay đổi."
-                        else
-                            git commit \
-                              -m "Update image to ${DOCKER_IMAGE}:${BUILD_NUMBER} [skip ci]"
-
-                            git push \
-                              "https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@github.com/anhkv100297/jenkins-ci-lab.git" \
-                              HEAD:main
-                        fi
-                    '''
+                                    git push \
+                                      "https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@github.com/anhkv100297/jenkins-ci-lab.git" \
+                                      HEAD:main
+                                fi
+                            '''
+                        }
+                    }
                 }
             }
         }
@@ -203,15 +165,7 @@ pipeline {
 
     post {
         success {
-            script {
-                if (env.SKIP_PIPELINE == "true") {
-                    echo "Pipeline đã bỏ qua vì commit chỉ cập nhật thư mục k8s."
-                } else {
-                    echo "CI hoàn thành."
-                    echo "Đã push image ${DOCKER_IMAGE}:${BUILD_NUMBER}."
-                    echo "ArgoCD sẽ tự triển khai phiên bản mới."
-                }
-            }
+            echo "Pipeline hoàn thành hoặc được bỏ qua an toàn."
         }
 
         failure {
