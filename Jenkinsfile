@@ -1,14 +1,14 @@
 pipeline {
     agent any
 
+    options {
+        // Không cho nhiều pipeline chạy chồng lên nhau
+        disableConcurrentBuilds(abortPrevious: true)
+    }
+
     environment {
-        // Docker Hub image đầy đủ
         DOCKER_IMAGE = "anhkv97/sample-ci-app"
-
-        // File manifest mà ArgoCD đang theo dõi
         DEPLOYMENT_FILE = "k8s/deployment.yaml"
-
-        // Cờ tránh Jenkins tự chạy lặp lại khi chính Jenkins cập nhật manifest
         SKIP_PIPELINE = "false"
     }
 
@@ -19,7 +19,7 @@ pipeline {
             }
         }
 
-        stage('Check commit') {
+        stage('Detect changes') {
             steps {
                 script {
                     def commitMessage = sh(
@@ -27,11 +27,33 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    echo "Commit message: ${commitMessage}"
+                    def changedFiles = sh(
+                        script: 'git diff-tree --no-commit-id --name-only -r HEAD',
+                        returnStdout: true
+                    ).trim()
 
-                    if (commitMessage.contains('[skip ci]')) {
+                    echo "Commit message:"
+                    echo commitMessage
+
+                    echo "Changed files:"
+                    echo changedFiles
+
+                    def files = changedFiles
+                        .split('\n')
+                        .findAll { it?.trim() }
+
+                    def onlyK8sChanged =
+                        !files.isEmpty() &&
+                        files.every { it.startsWith('k8s/') }
+
+                    if (
+                        commitMessage.contains('[skip ci]') ||
+                        onlyK8sChanged
+                    ) {
                         env.SKIP_PIPELINE = "true"
-                        echo "Phát hiện [skip ci]. Bỏ qua build để tránh pipeline chạy lặp."
+                        echo "Commit chỉ cập nhật manifest Kubernetes. Bỏ qua CI để tránh vòng lặp."
+                    } else {
+                        echo "Có thay đổi source hoặc cấu hình build. Tiếp tục pipeline."
                     }
                 }
             }
@@ -47,7 +69,7 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
-                      --volumes-from $HOSTNAME \
+                      --volumes-from "$HOSTNAME" \
                       -w "$WORKSPACE" \
                       node:20-alpine \
                       npm install
@@ -65,7 +87,7 @@ pipeline {
             steps {
                 sh '''
                     docker run --rm \
-                      --volumes-from $HOSTNAME \
+                      --volumes-from "$HOSTNAME" \
                       -w "$WORKSPACE" \
                       node:20-alpine \
                       npm test
@@ -106,10 +128,10 @@ pipeline {
                     )
                 ]) {
                     sh '''
-                        echo "$DOCKERHUB_TOKEN" | \
+                        echo "$DOCKERHUB_TOKEN" |
                           docker login \
-                          -u "$DOCKERHUB_USERNAME" \
-                          --password-stdin
+                            -u "$DOCKERHUB_USERNAME" \
+                            --password-stdin
 
                         docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
                         docker push ${DOCKER_IMAGE}:latest
@@ -129,14 +151,14 @@ pipeline {
 
             steps {
                 sh '''
-                    echo "Image trước khi cập nhật:"
+                    echo "Manifest trước khi cập nhật:"
                     grep "image:" ${DEPLOYMENT_FILE}
 
                     sed -i \
                       "s|image: ${DOCKER_IMAGE}:.*|image: ${DOCKER_IMAGE}:${BUILD_NUMBER}|" \
                       ${DEPLOYMENT_FILE}
 
-                    echo "Image sau khi cập nhật:"
+                    echo "Manifest sau khi cập nhật:"
                     grep "image:" ${DEPLOYMENT_FILE}
                 '''
             }
@@ -164,9 +186,10 @@ pipeline {
                         git add ${DEPLOYMENT_FILE}
 
                         if git diff --cached --quiet; then
-                            echo "Manifest không thay đổi, không cần commit."
+                            echo "Manifest không thay đổi."
                         else
-                            git commit -m "Update image to ${DOCKER_IMAGE}:${BUILD_NUMBER} [skip ci]"
+                            git commit \
+                              -m "Update image to ${DOCKER_IMAGE}:${BUILD_NUMBER} [skip ci]"
 
                             git push \
                               "https://${GITHUB_USERNAME}:${GITHUB_TOKEN}@github.com/anhkv100297/jenkins-ci-lab.git" \
@@ -182,17 +205,17 @@ pipeline {
         success {
             script {
                 if (env.SKIP_PIPELINE == "true") {
-                    echo 'Pipeline được bỏ qua vì đây là commit cập nhật manifest của Jenkins.'
+                    echo "Pipeline đã bỏ qua vì commit chỉ cập nhật thư mục k8s."
                 } else {
-                    echo "CI hoàn thành thành công."
-                    echo "Docker image: ${DOCKER_IMAGE}:${BUILD_NUMBER}"
-                    echo "ArgoCD sẽ tự đồng bộ manifest mới vào Kubernetes."
+                    echo "CI hoàn thành."
+                    echo "Đã push image ${DOCKER_IMAGE}:${BUILD_NUMBER}."
+                    echo "ArgoCD sẽ tự triển khai phiên bản mới."
                 }
             }
         }
 
         failure {
-            echo 'Pipeline thất bại. Hãy kiểm tra Console Output.'
+            echo "Pipeline thất bại. Kiểm tra Console Output."
         }
 
         always {
