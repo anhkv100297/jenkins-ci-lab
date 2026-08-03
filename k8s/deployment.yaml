@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: sample-ci-app
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: sample-ci-app
+
+  template:
+    metadata:
+      labels:
+        app: sample-ci-app
+
+    spec:
+      containers:
+      - name: sample-ci-app
+
+        image: DOCKERHUB_USERNAME/sample-ci-app:latest
+
+        ports:
+        - containerPort: 3000
