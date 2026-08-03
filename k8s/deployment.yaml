@@ -18,9 +18,9 @@ spec:
 
     spec:
       containers:
-      - name: sample-ci-app
+        - name: sample-ci-app
+          image: anhkv97/sample-ci-app:latest
+          imagePullPolicy: Always
 
-        image: DOCKERHUB_USERNAME/sample-ci-app:latest
-
-        ports:
-        - containerPort: 3000
+          ports:
+            - containerPort: 3000
