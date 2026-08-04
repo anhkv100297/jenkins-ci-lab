@@ -32,7 +32,7 @@ app.get("/", (req, res) => {
 
         <!-- Headline -->
         <h1 class="text-3xl font-semibold tracking-tight text-[#1d1d1f] mb-3">
-         Owner Vanh - CI/CD Deployment
+         CI/CD Deployment
         </h1>
         
         <!-- Subtitle Gradient -->
