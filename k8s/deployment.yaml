@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: sample-ci-app
-          image: anhkv97/sample-ci-app:30
+          image: anhkv97/sample-ci-app:32
           imagePullPolicy: Always
 
           ports:
